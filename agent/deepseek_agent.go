@@ -250,8 +250,8 @@ func (a *DeepseekAgent) getFieldStatusMessage() string {
 
 // askLLMForNextAction gets the next action from the LLM
 func (a *DeepseekAgent) askLLMForNextAction() (map[string]interface{}, error) {
-	// Get completion from Deepseek
-	response, err := a.llmClient.Complete(a.conversation)
+	// Get completion from Deepseek using R1 model for better reasoning
+	response, err := a.llmClient.CompleteWithR1(a.conversation)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get LLM completion: %w", err)
 	}

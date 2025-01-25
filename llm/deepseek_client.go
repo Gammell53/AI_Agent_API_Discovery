@@ -12,6 +12,14 @@ import (
 	"strings"
 )
 
+// ModelType represents different DeepSeek model types
+type ModelType string
+
+const (
+	ModelChat ModelType = "deepseek-chat"
+	ModelR1   ModelType = "deepseek-reasoner"
+)
+
 // DeepseekClient handles communication with the Deepseek API
 type DeepseekClient struct {
 	apiKey     string
@@ -55,16 +63,87 @@ func NewDeepseekClient() (*DeepseekClient, error) {
 	}, nil
 }
 
-// Complete sends a completion request to the Deepseek API
-func (c *DeepseekClient) Complete(messages []models.Message) (*models.Message, error) {
-	utils.Logger.Printf("Sending completion request to Deepseek API with %d messages", len(messages))
+// CompleteWithModel sends a completion request to the Deepseek API using the specified model
+func (c *DeepseekClient) CompleteWithModel(messages []models.Message, model ModelType) (*models.Message, error) {
+	utils.Logger.Printf("Sending completion request to Deepseek API with %d messages using model %s", len(messages), model)
+
+	// For the reasoner model, we need special message ordering
+	if model == ModelR1 {
+		var systemMsgs, userMsgs, assistantMsgs []models.Message
+		for _, msg := range messages {
+			switch msg.Role {
+			case "system":
+				systemMsgs = append(systemMsgs, msg)
+			case "user":
+				userMsgs = append(userMsgs, msg)
+			case "assistant":
+				assistantMsgs = append(assistantMsgs, msg)
+			}
+		}
+
+		// Reconstruct message sequence:
+		// 1. System messages first
+		// 2. First non-system message must be user
+		// 3. Then strictly alternating user/assistant messages
+		// 4. Ensure last message is from user
+		messages = systemMsgs
+
+		// If we have no user messages, add a starter one
+		if len(userMsgs) == 0 {
+			messages = append(messages, models.Message{
+				Role:    "user",
+				Content: "Please help me discover the API schema.",
+			})
+		} else {
+			// Add first user message
+			messages = append(messages, userMsgs[0])
+			userMsgs = userMsgs[1:]
+
+			// Strictly alternate between assistant and user messages
+			minLen := len(assistantMsgs)
+			if len(userMsgs) < minLen {
+				minLen = len(userMsgs)
+			}
+
+			for i := 0; i < minLen; i++ {
+				messages = append(messages, assistantMsgs[i])
+				messages = append(messages, userMsgs[i])
+			}
+
+			// If we have leftover messages, add at most one more of either type
+			if len(assistantMsgs) > minLen {
+				messages = append(messages, assistantMsgs[minLen])
+				messages = append(messages, models.Message{
+					Role:    "user",
+					Content: "Please continue with the next step.",
+				})
+			} else if len(userMsgs) > minLen {
+				// If we have a leftover user message, use it as the last message
+				messages = append(messages, userMsgs[minLen])
+			}
+		}
+
+		// Final check: ensure last message is from user
+		if len(messages) > 0 && messages[len(messages)-1].Role != "user" {
+			messages = append(messages, models.Message{
+				Role:    "user",
+				Content: "Please continue with the next step.",
+			})
+		}
+	}
 
 	reqBody := DeepseekRequest{
-		Model:       "deepseek-chat",
+		Model:       string(model),
 		Messages:    messages,
 		Temperature: 0.7,
 		MaxTokens:   1000,
 		Stream:      false,
+	}
+
+	// Adjust parameters for R1 model
+	if model == ModelR1 {
+		reqBody.Temperature = 0.3 // Lower temperature for more focused reasoning
+		reqBody.MaxTokens = 2000  // Increased context for complex reasoning
 	}
 
 	jsonData, err := json.Marshal(reqBody)
@@ -117,6 +196,16 @@ func (c *DeepseekClient) Complete(messages []models.Message) (*models.Message, e
 	utils.Logger.Printf("Parsed response:\nRole: %s\nContent: %s", response.Role, response.Content)
 
 	return response, nil
+}
+
+// Complete sends a completion request to the Deepseek API using the default chat model
+func (c *DeepseekClient) Complete(messages []models.Message) (*models.Message, error) {
+	return c.CompleteWithModel(messages, ModelChat)
+}
+
+// CompleteWithR1 sends a completion request using the DeepSeek R1 model
+func (c *DeepseekClient) CompleteWithR1(messages []models.Message) (*models.Message, error) {
+	return c.CompleteWithModel(messages, ModelR1)
 }
 
 // ParseAction parses the LLM response into an action map
