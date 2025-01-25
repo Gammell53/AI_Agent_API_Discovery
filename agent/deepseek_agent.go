@@ -167,7 +167,7 @@ Remember:
 		response, err := a.executeHTTP(nextAction)
 		if err != nil {
 			errMsg := fmt.Sprintf("HTTP call failed: %v", err)
-			utils.Logger.Printf(errMsg)
+			utils.Logger.Print(errMsg)
 			a.addSystemMessage(errMsg)
 			continue
 		}
@@ -361,17 +361,6 @@ func (a *DeepseekAgent) handleSuccess(resp *models.HTTPResponse) (*models.Discov
 
 	// Return schema immediately - we've found all required fields
 	return a.buildSchema(), true
-}
-
-// diffFields returns fields that are in oldBody but not in newBody
-func diffFields(oldBody, newBody map[string]interface{}) []string {
-	var removed []string
-	for field := range oldBody {
-		if _, exists := newBody[field]; !exists {
-			removed = append(removed, field)
-		}
-	}
-	return removed
 }
 
 // handleErrorResponse processes an error response from the API
