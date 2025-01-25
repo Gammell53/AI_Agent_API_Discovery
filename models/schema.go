@@ -11,24 +11,35 @@ type DiscoverRequest struct {
 
 // DiscoveredSchema represents the final output of field discovery
 type DiscoveredSchema struct {
-	Fields []FieldInfo `json:"fields"`
+	Fields             []FieldInfo            `json:"fields"`
+	MinimalRequestBody map[string]interface{} `json:"minimalRequestBody"`
 }
 
 // FieldInfo represents information about a discovered field
 type FieldInfo struct {
-	Name        string      `json:"name"`
-	Type        string      `json:"type"`              // string, integer, boolean, object, array, etc.
-	Required    bool        `json:"required"`          // discovered via testing
-	Format      string      `json:"format,omitempty"`  // email, date, uuid, etc.
-	Pattern     string      `json:"pattern,omitempty"` // regex pattern if applicable
-	MinLength   *int        `json:"minLength,omitempty"`
-	MaxLength   *int        `json:"maxLength,omitempty"`
-	Minimum     *float64    `json:"minimum,omitempty"`
-	Maximum     *float64    `json:"maximum,omitempty"`
-	Enum        []string    `json:"enum,omitempty"` // possible values if field is enumerated
-	Children    []FieldInfo `json:"children,omitempty"`
-	SampleValue interface{} `json:"sampleValue,omitempty"`
-	Description string      `json:"description,omitempty"`
+	Name           string       `json:"name"`
+	Type           string       `json:"type"`              // string, integer, boolean, object, array, etc.
+	Format         string       `json:"format,omitempty"`  // email, date, uuid, etc.
+	Pattern        string       `json:"pattern,omitempty"` // regex pattern if applicable
+	MinLength      *int         `json:"minLength,omitempty"`
+	MaxLength      *int         `json:"maxLength,omitempty"`
+	Minimum        *float64     `json:"minimum,omitempty"`
+	Maximum        *float64     `json:"maximum,omitempty"`
+	Enum           []string     `json:"enum,omitempty"` // possible values if field is enumerated
+	Children       []FieldInfo  `json:"children,omitempty"`
+	SampleValue    interface{}  `json:"sampleValue,omitempty"`
+	Description    string       `json:"description,omitempty"`
+	IsInMinimalSet bool         `json:"isInMinimalSet"`        // whether this field is part of minimal set
+	TestResults    *TestResults `json:"testResults,omitempty"` // results of field testing
+}
+
+// TestResults represents the results of field testing
+type TestResults struct {
+	SuccessfulTests int           `json:"successfulTests"`
+	FailedTests     int           `json:"failedTests"`
+	TestedValues    []interface{} `json:"testedValues,omitempty"`
+	FailedValues    []interface{} `json:"failedValues,omitempty"`
+	ErrorMessages   []string      `json:"errorMessages,omitempty"`
 }
 
 // FieldTestStatus tracks the testing status of each field

@@ -13,21 +13,26 @@ import (
 
 // FieldTestStatus tracks the testing status of each field
 type FieldTestStatus struct {
-	IsDiscovered        bool // Field has been found
-	IsTypeVerified      bool // Type has been verified
-	IsRequired          bool // Whether field is required
-	IsOptionalityTested bool // We've tested if it's optional
+	IsDiscovered     bool          // Field has been found
+	IsTypeVerified   bool          // Type has been verified
+	IsInMinimalSet   bool          // Part of minimal successful set
+	TestedValues     []interface{} // Values tried
+	FailedValues     []interface{} // Values that failed
+	ValidationErrors []string      // Collection of validation errors received
+	SuccessfulTests  int           // Count of successful tests
+	FailedTests      int           // Count of failed tests
 }
 
 // DeepseekAgent orchestrates the API discovery process using LLM
 type DeepseekAgent struct {
-	request      models.DiscoverRequest
-	conversation []models.Message
-	knownFields  map[string]*models.FieldInfo
-	fieldStatus  map[string]*FieldTestStatus
-	currentBody  map[string]interface{}
-	iterations   int
-	llmClient    *llm.DeepseekClient
+	request            models.DiscoverRequest
+	conversation       []models.Message
+	knownFields        map[string]*models.FieldInfo
+	fieldStatus        map[string]*FieldTestStatus
+	currentBody        map[string]interface{}
+	minimalSuccessBody map[string]interface{} // Stores the smallest working request body
+	iterations         int
+	llmClient          *llm.DeepseekClient
 }
 
 // NewDeepseekAgent creates a new instance of DeepseekAgent
@@ -38,13 +43,14 @@ func NewDeepseekAgent(req models.DiscoverRequest) (*DeepseekAgent, error) {
 	}
 
 	return &DeepseekAgent{
-		request:      req,
-		conversation: []models.Message{},
-		knownFields:  make(map[string]*models.FieldInfo),
-		fieldStatus:  make(map[string]*FieldTestStatus),
-		currentBody:  req.InitialBody,
-		iterations:   0,
-		llmClient:    client,
+		request:            req,
+		conversation:       []models.Message{},
+		knownFields:        make(map[string]*models.FieldInfo),
+		fieldStatus:        make(map[string]*FieldTestStatus),
+		currentBody:        req.InitialBody,
+		minimalSuccessBody: make(map[string]interface{}),
+		iterations:         0,
+		llmClient:          client,
 	}, nil
 }
 
@@ -196,11 +202,12 @@ Remember:
 		utils.Logger.Printf("\nCurrent known fields:")
 		for fieldName, info := range a.knownFields {
 			status := a.fieldStatus[fieldName]
-			utils.Logger.Printf("- %s: type=%s, required=%v, tested=%v",
+			utils.Logger.Printf("- %s: type=%s, in minimal set=%v, tests=%d/%d",
 				fieldName,
 				info.Type,
-				status.IsRequired,
-				status.IsOptionalityTested)
+				status.IsInMinimalSet,
+				status.SuccessfulTests,
+				status.SuccessfulTests+status.FailedTests)
 		}
 
 		// Add status update to conversation
@@ -215,19 +222,31 @@ Remember:
 
 // isDiscoveryComplete checks if we've completed testing all fields
 func (a *DeepseekAgent) isDiscoveryComplete() bool {
-	// We only care about discovering required fields now
-	return len(a.fieldStatus) > 0
+	// We need at least one successful request
+	if len(a.minimalSuccessBody) == 0 {
+		return false
+	}
+
+	// Check if we've tried to minimize the set
+	for _, status := range a.fieldStatus {
+		if status.IsInMinimalSet && status.SuccessfulTests == 0 {
+			// Haven't verified this field's necessity
+			return false
+		}
+	}
+
+	return true
 }
 
 // getIncompleteFieldsMessage generates a message about incomplete field testing
 func (a *DeepseekAgent) getIncompleteFieldsMessage() string {
 	var incomplete []string
 	for fieldName, status := range a.fieldStatus {
-		if !status.IsDiscovered {
-			incomplete = append(incomplete, fmt.Sprintf("%s (not discovered)", fieldName))
+		if status.IsInMinimalSet && status.SuccessfulTests == 0 {
+			incomplete = append(incomplete, fmt.Sprintf("%s (needs verification)", fieldName))
 		}
 	}
-	return fmt.Sprintf("Fields still being discovered: %v", incomplete)
+	return fmt.Sprintf("Fields still being verified: %v", incomplete)
 }
 
 // getFieldStatusMessage generates a message about current field testing status
@@ -239,10 +258,12 @@ func (a *DeepseekAgent) getFieldStatusMessage() string {
 			continue
 		}
 		status = append(status, fmt.Sprintf(
-			"%s (type: %s, required: %v)",
+			"%s (type: %s, in minimal set: %v, tests: %d/%d)",
 			fieldName,
 			info.Type,
-			fieldStatus.IsRequired,
+			fieldStatus.IsInMinimalSet,
+			fieldStatus.SuccessfulTests,
+			fieldStatus.SuccessfulTests+fieldStatus.FailedTests,
 		))
 	}
 	return fmt.Sprintf("Current field status:\n%v", status)
@@ -332,34 +353,42 @@ func (a *DeepseekAgent) handleSuccess(resp *models.HTTPResponse) (*models.Discov
 	var respJSON map[string]interface{}
 	if err := json.Unmarshal(resp.ResponseBody, &respJSON); err == nil {
 		utils.Logger.Printf("Response body: %+v", respJSON)
+		a.updateKnownFields(respJSON)
 	}
 
-	// Only mark fields as required if they were explicitly required in error messages
-	// or if they were part of the minimum successful request
+	// Store this as our minimal success body if we don't have one yet
+	if len(a.minimalSuccessBody) == 0 {
+		a.minimalSuccessBody = make(map[string]interface{})
+		for k, v := range a.currentBody {
+			a.minimalSuccessBody[k] = v
+		}
+	}
+
+	// Mark fields in the minimal success body
 	for fieldName := range a.currentBody {
 		if status, exists := a.fieldStatus[fieldName]; exists {
 			status.IsDiscovered = true
 			status.IsTypeVerified = true
-			// Only keep required=true if it was marked as required by error messages
+			status.IsInMinimalSet = true
+			status.SuccessfulTests++
 		}
 	}
 
 	// Identify server-generated fields
 	serverGeneratedFields := []string{"id", "isActive", "createdAt", "updatedAt"}
 	for _, field := range serverGeneratedFields {
-		if info, exists := a.knownFields[field]; exists {
-			info.Required = false
+		if _, exists := a.knownFields[field]; exists {
 			if status, exists := a.fieldStatus[field]; exists {
-				status.IsRequired = false
+				status.IsInMinimalSet = false
 			}
 		}
 	}
 
 	// Log success
-	utils.Logger.Printf("Successfully discovered all required fields!")
-	utils.Logger.Printf("Final request body that succeeded: %+v", a.currentBody)
+	utils.Logger.Printf("Successfully discovered minimal field set!")
+	utils.Logger.Printf("Minimal request body that succeeded: %+v", a.minimalSuccessBody)
 
-	// Return schema immediately - we've found all required fields
+	// Return schema immediately - we've found a working set
 	return a.buildSchema(), true
 }
 
@@ -458,9 +487,18 @@ func (a *DeepseekAgent) updateFieldFromError(field, errMsg string) {
 				info.Type = fieldType
 			} else {
 				a.knownFields[field] = &models.FieldInfo{
-					Name:     field,
-					Type:     fieldType,
-					Required: true,
+					Name: field,
+					Type: fieldType,
+				}
+				// Mark as part of minimal set since it was mentioned in error
+				if status, exists := a.fieldStatus[field]; exists {
+					status.IsInMinimalSet = true
+				} else {
+					a.fieldStatus[field] = &FieldTestStatus{
+						IsDiscovered:   true,
+						IsTypeVerified: true,
+						IsInMinimalSet: true,
+					}
 				}
 			}
 			break
@@ -468,23 +506,20 @@ func (a *DeepseekAgent) updateFieldFromError(field, errMsg string) {
 	}
 }
 
-// markFieldRequired marks a field as required
+// markFieldRequired marks a field as potentially part of minimal set
 func (a *DeepseekAgent) markFieldRequired(field string) {
-	if info, exists := a.knownFields[field]; exists {
-		info.Required = true
-	} else {
+	if _, exists := a.knownFields[field]; !exists {
 		a.knownFields[field] = &models.FieldInfo{
-			Name:     field,
-			Required: true,
+			Name: field,
 		}
 	}
 
 	if status, exists := a.fieldStatus[field]; exists {
-		status.IsRequired = true
+		status.IsInMinimalSet = true
 	} else {
 		a.fieldStatus[field] = &FieldTestStatus{
-			IsRequired:   true,
-			IsDiscovered: true,
+			IsDiscovered:   true,
+			IsInMinimalSet: true,
 		}
 	}
 }
@@ -509,7 +544,6 @@ func (a *DeepseekAgent) updateKnownFields(respJSON map[string]interface{}) {
 			a.knownFields[key] = &models.FieldInfo{
 				Name:        key,
 				Type:        inferType(value),
-				Required:    false, // Default to false unless explicitly required
 				SampleValue: value,
 			}
 		}
@@ -519,7 +553,6 @@ func (a *DeepseekAgent) updateKnownFields(respJSON map[string]interface{}) {
 			a.fieldStatus[key] = &FieldTestStatus{
 				IsDiscovered:   true,
 				IsTypeVerified: true,
-				IsRequired:     false, // Default to false unless explicitly required
 			}
 		}
 	}
@@ -688,10 +721,42 @@ func inferType(value interface{}) string {
 // buildSchema creates the final schema from discovered fields
 func (a *DeepseekAgent) buildSchema() *models.DiscoveredSchema {
 	var fields []models.FieldInfo
-	for _, info := range a.knownFields {
-		fields = append(fields, *info)
+
+	// First add fields from the minimal success body
+	for fieldName, value := range a.minimalSuccessBody {
+		if info, exists := a.knownFields[fieldName]; exists {
+			fieldInfo := *info
+			fieldInfo.IsInMinimalSet = true
+			fieldInfo.SampleValue = value
+			fields = append(fields, fieldInfo)
+		}
 	}
-	return &models.DiscoveredSchema{Fields: fields}
+
+	// Then add any other discovered fields
+	for fieldName, info := range a.knownFields {
+		// Skip if already added from minimal set
+		if _, inMinimal := a.minimalSuccessBody[fieldName]; inMinimal {
+			continue
+		}
+
+		fieldInfo := *info
+		if status, exists := a.fieldStatus[fieldName]; exists {
+			fieldInfo.IsInMinimalSet = status.IsInMinimalSet
+			fieldInfo.TestResults = &models.TestResults{
+				SuccessfulTests: status.SuccessfulTests,
+				FailedTests:     status.FailedTests,
+				TestedValues:    status.TestedValues,
+				FailedValues:    status.FailedValues,
+				ErrorMessages:   status.ValidationErrors,
+			}
+		}
+		fields = append(fields, fieldInfo)
+	}
+
+	return &models.DiscoveredSchema{
+		Fields:             fields,
+		MinimalRequestBody: a.minimalSuccessBody,
+	}
 }
 
 // addSystemMessage adds a system message to the conversation
